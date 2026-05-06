@@ -1,4 +1,4 @@
-module domreg
+module kalkulator
 
 go 1.26.2
 
