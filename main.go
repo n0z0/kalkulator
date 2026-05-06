@@ -43,10 +43,19 @@ func generateOnionAddress(pubKey ed25519.PublicKey) string {
 }
 
 // worker adalah goroutine yang akan terus mencari keypair hingga menemukan prefix yang cocok
-func worker(prefix string, wg *sync.WaitGroup, found *int32, resultChan chan<- ed25519.PrivateKey) {
+func worker(prefix string, wg *sync.WaitGroup, found *int32, resultChan chan<- ed25519.PrivateKey, attempts *uint64) {
 	defer wg.Done()
 
+	var localAttempts uint64 = 0
+
 	for atomic.LoadInt32(found) == 0 { // Looping selama belum ada yang menemukan
+		localAttempts++
+
+		// Update global counter tiap 1000 iterasi agar tidak terjadi lock contention di CPU
+		if localAttempts%1000 == 0 {
+			atomic.AddUint64(attempts, 1000)
+		}
+
 		pub, priv, err := ed25519.GenerateKey(nil)
 		if err != nil {
 			continue
@@ -57,6 +66,7 @@ func worker(prefix string, wg *sync.WaitGroup, found *int32, resultChan chan<- e
 		if strings.HasPrefix(addr, prefix) {
 			// Memastikan hanya satu goroutine yang melaporkan keberhasilan
 			if atomic.CompareAndSwapInt32(found, 0, 1) {
+				atomic.AddUint64(attempts, localAttempts%1000) // tambahkan sisa percobaan ke total
 				resultChan <- priv
 			}
 			return
@@ -101,14 +111,34 @@ func main() {
 
 	var wg sync.WaitGroup
 	var found int32 = 0
+	var attempts uint64 = 0
 	resultChan := make(chan ed25519.PrivateKey, 1)
 
 	startTime := time.Now()
 
+	// Goroutine untuk menampilkan progres secara realtime
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		var lastAttempts uint64 = 0
+		for {
+			<-ticker.C
+			if atomic.LoadInt32(&found) == 1 {
+				// Membersihkan baris terminal saat berhasil ditemukan
+				fmt.Print("\r\033[K")
+				return
+			}
+			currentAttempts := atomic.LoadUint64(&attempts)
+			speed := currentAttempts - lastAttempts
+			lastAttempts = currentAttempts
+			fmt.Printf("\rProgres... %d kunci diperiksa (Kecepatan: %d kunci/detik)", currentAttempts, speed)
+		}
+	}()
+
 	// Menjalankan worker sebanyak jumlah CPU
 	for i := 0; i < numCPU; i++ {
 		wg.Add(1)
-		go worker(prefix, &wg, &found, resultChan)
+		go worker(prefix, &wg, &found, resultChan, &attempts)
 	}
 
 	// Menunggu hasil dari worker pertama yang berhasil
